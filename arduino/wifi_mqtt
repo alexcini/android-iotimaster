@@ -1,0 +1,211 @@
+#include <Adafruit_CC3000.h>
+#include <ccspi.h>
+#include <SPI.h>
+#include <cc3000_PubSubClient.h>
+
+#define aref_voltage 3.3
+
+// Estes são os pinos de interrupção e controle
+#define ADAFRUIT_CC3000_IRQ   3 
+
+// Estes podem ser quaisquer dois pinos
+#define ADAFRUIT_CC3000_VBAT  5
+#define ADAFRUIT_CC3000_CS    10
+
+// Use hardware SPI for the remaining pins
+// Numa UNO, SCK = 13, MISO = 12 e MOSI = 11
+Adafruit_CC3000 cc3000 = Adafruit_CC3000(ADAFRUIT_CC3000_CS, ADAFRUIT_CC3000_IRQ, ADAFRUIT_CC3000_VBAT, SPI_CLOCK_DIVIDER);
+
+//ALTERAR ESSES VALORES PARA O DA SUA REDE WI-FI
+#define WLAN_SSID       "XXXXXXXX"
+#define WLAN_PASS       "XXXXXXXX"
+
+// Security can be WLAN_SEC_UNSEC, WLAN_SEC_WEP, WLAN_SEC_WPA or WLAN_SEC_WPA2
+#define WLAN_SECURITY   WLAN_SEC_WPA2
+
+// DEFINE A PORTA EM QUE O SENSOR LM35 ESTA CONECTADA. ALTERAR CASO NAO ESTEJA NA MESMA DO DESENHO
+#define LM35  A0
+Adafruit_CC3000_Client client;
+     
+//TMP36
+int tempPin = 1;        
+int tempReading;
+
+float temperatura;
+
+union ArrayToIp {
+  byte array[4];
+  uint32_t ip;
+};
+
+//CALLBACK RECEBER AS MENSAGENS CASO QUEIRA RECEBER DADO DE ALGUM TÓPICO
+void callback (char* topic, byte* payload, unsigned int length) {
+  
+}
+
+// IP DO SERVIDOR MQTT INVERTIDO. POR EXEMPLO 192.168.2.5 DEVERÁ SER FORNECIDO COMO 5, 2, 168, 192
+ArrayToIp server = { 5, 2, 168, 192 };
+cc3000_PubSubClient mqttclient(server.ip, 1883, callback, client, cc3000);
+
+void setup(void)
+{
+  Serial.begin(115200);
+  Serial.println(F("Hello, CC3000!\n"));
+
+  displayDriverMode();
+  
+  Serial.println(F("\nInicializando o Shield CC3000 ..."));
+  if (!cc3000.begin()) {
+    Serial.println(F("Não foi possivel encontrar o Shield. Verifique se ele esta devidamente conectado?"));
+    for(;;);
+  }
+
+  uint16_t firmware = checkFirmwareVersion();
+  if ((firmware != 0x113) && (firmware != 0x118)) {
+    Serial.println(F("Versão do Firmware errada!"));
+    for(;;);
+  }
+  
+  displayMACAddress();
+  
+  Serial.println(F("\nExcluindo perfis de conexão antigas"));
+  if (!cc3000.deleteProfiles()) {
+    Serial.println(F("Failed!"));
+    while(1);
+  }
+
+  /* Tentando se conectar no access point. WLAN_SSID aceita 32 caracateres no maximo*/
+  char *ssid = WLAN_SSID;
+  Serial.print(F("\nTentando conectar na rede ")); Serial.println(ssid);
+  
+  if (!cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY)) {
+    Serial.println(F("Failed!"));
+    while(1);
+  }
+   
+  Serial.println(F("Connected!"));
+  
+  /* Aguardando até o dhcp terminar */
+  Serial.println(F("Request DHCP"));
+  while (!cc3000.checkDHCP()) {
+    delay(100); // ToDo: Insert a DHCP timeout!
+  }
+
+  /* Mostra as configurações de rede do arduino no serial monitor */  
+  while (!displayConnectionDetails()) {
+    delay(1000);
+  }
+   
+   // Conecta ao broker
+   if (!client.connected()) {
+     client = cc3000.connectTCP(server.ip, 1883);
+   }
+   
+   // Tudo certo envia mensagem informando que o device esta conectado
+   if(client.connected()) {
+    // Device01 - nome/identificador do seu device
+    if (mqttclient.connect("Device01")) {
+      //o Primeiro parametro do publish é o tópico o segundo é a mensagem enviada
+      mqttclient.publish("temperatura","Device01 - Conectado");
+    }
+   } 
+}
+
+void loop(void) {
+
+  // Converte a temperatura para Celsius
+  temperatura = (float(analogRead(LM35))*5/(1023))/0.01;
+
+  // Exibe a temperatura no serial monitor
+  Serial.println(temperatura);
+  
+  char stringTemperatura[10];
+  dtostrf(temperatura, 0, 2, stringTemperatura);
+ 
+  // Verifica se ainda esta conectado para enviar o dado
+  if (!client.connected()) {
+     client = cc3000.connectTCP(server.ip, 1883);
+     
+     if(client.connected()) {
+       if (mqttclient.connect("Device01")) {
+          mqttclient.publish("temperaturate","Device01 - Conectado");
+       }
+     } 
+  } else {
+    // Envia a temperatura lida
+    mqttclient.publish("temperatura", stringTemperatura);
+  }
+  // Aguarda 5 segundos até se preparar para enviar novamente a temperatura
+  delay(5000);
+}
+
+void displayDriverMode(void)
+{
+  #ifdef CC3000_TINY_DRIVER
+    Serial.println(F("CC3000 configurado o Tiny Mode"));
+  #else
+    Serial.print(F("RX Buffer : "));
+    Serial.print(CC3000_RX_BUFFER_SIZE);
+    Serial.println(F(" bytes"));
+    Serial.print(F("TX Buffer : "));
+    Serial.print(CC3000_TX_BUFFER_SIZE);
+    Serial.println(F(" bytes"));
+  #endif
+}
+
+uint16_t checkFirmwareVersion(void)
+{
+  uint8_t major, minor;
+  uint16_t version;
+  
+#ifndef CC3000_TINY_DRIVER  
+  if(!cc3000.getFirmwareVersion(&major, &minor))
+  {
+    Serial.println(F("Não foi possível recuperar a versão do firmware!\r\n"));
+    version = 0;
+  }
+  else
+  {
+    Serial.print(F("Firmware V. : "));
+    Serial.print(major); Serial.print(F(".")); Serial.println(minor);
+    version = major; version <<= 8; version |= minor;
+  }
+#endif
+  return version;
+}
+
+void displayMACAddress(void)
+{
+  uint8_t macAddress[6];
+  
+  if(!cc3000.getMacAddress(macAddress))
+  {
+    Serial.println(F("Não foi possivel obter o MAC Address!\r\n"));
+  }
+  else
+  {
+    Serial.print(F("MAC Address : "));
+    cc3000.printHex((byte*)&macAddress, 6);
+  }
+}
+
+bool displayConnectionDetails(void)
+{
+  uint32_t ipAddress, netmask, gateway, dhcpserv, dnsserv;
+  
+  if(!cc3000.getIPAddress(&ipAddress, &netmask, &gateway, &dhcpserv, &dnsserv))
+  {
+    Serial.println(F("Não foi possivel recuperar o IP!\r\n"));
+    return false;
+  }
+  else
+  {
+    Serial.print(F("\nIP: ")); cc3000.printIPdotsRev(ipAddress);
+    Serial.print(F("\nNetmask (Mascara de Rede): ")); cc3000.printIPdotsRev(netmask);
+    Serial.print(F("\nGateway: ")); cc3000.printIPdotsRev(gateway);
+    Serial.print(F("\nDHCPsrv: ")); cc3000.printIPdotsRev(dhcpserv);
+    Serial.print(F("\nDNSserv: ")); cc3000.printIPdotsRev(dnsserv);
+    Serial.println();
+    return true;
+  }
+}
